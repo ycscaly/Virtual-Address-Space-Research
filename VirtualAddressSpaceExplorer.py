@@ -3,17 +3,19 @@ import volatility.registry as registry
 import volatility.commands as commands
 import volatility.win32.network as network
 import volatility.utils as utils
-
+import volatility.win32 as win32
 # configure volatility
 registry.PluginImporter()
 config = conf.ConfObject()
 registry.register_global_options(config, commands.Command)
-filePath = "file:///D:/Research/memory.dmp"
-
+#filePath = "file:///D:/Research/Virtual Address Space Research/ubuntu12045.dmp"
+filePath = "file:///D:/Research/Virtual Address Space Research/memory.dmp"
 # default config (note my .volatilityrc is missing some values, 
 # so I just used pdb to figure out which values needed setting
 
-base_conf = {'profile': 'Win8SP1x64', 
+base_conf = {
+    'profile': 'Win8SP1x64', 
+    #'profile': 'LinuxUbuntu12045x64', 
     'use_old_as': None, 
     'kdbg': None, 
     'help': False, 
@@ -44,10 +46,20 @@ for k,v in base_conf.items():
 
 addressSpace = utils.load_as(config)
 
-
 '''
     These function requires to pull the latest Volatility version from git, as it uses some new api.
 '''
+
+def findSelfReferenceEntry():
+    for pml4Selector in range(0,0x200):
+        address = pml4Selector << 39
+        if(pml4Selector & 0x100):
+            address = 0xffff000000000000 + address 
+        vaddr = long(address)
+        pml4e = addressSpace.get_pml4e(vaddr)
+        pdptAddress = pml4e & 0xffffffffff000
+        if(pdptAddress == addressSpace.dtb):
+            print "Found a Self-Reference selectot at index ", hex(pml4Selector), "!"
 
 #These functions iterate over the addresspace seeking for PAGE_READWRITE_EXECUTE kernel pages and ranges.
 def printKernelExecutableAndWriteablePages():
@@ -104,4 +116,4 @@ def isAddressWriteable(addr):
 def isKernelSpaceAddress(addr):
     return any(map(lambda entry: addressSpace.is_supervisor_page(entry), getPageTableEntries(addr)))
 
-printKernelExecutableAndWriteableRanges()
+findSelfReferenceEntry()
