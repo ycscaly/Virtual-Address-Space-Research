@@ -4,9 +4,11 @@ import volatility.commands as commands
 import volatility.win32.network as network
 import volatility.utils as utils
 import volatility.win32 as win32
-
+import volatility.plugins.linux.lsmod as linux_lsmod
+import volatility.plugins.modscan as modscan
 import struct
 
+PAGE_SIZE = 4096
 MAX_SELECTOR = 0x200
 SELECTOR_MSB = 0x100
 PAGING_TABLE_SIZE = MAX_SELECTOR * 8
@@ -16,14 +18,12 @@ ENTRY_SIZE = 8
 registry.PluginImporter()
 config = conf.ConfObject()
 registry.register_global_options(config, commands.Command)
-#filePath = "file:///D:/Research/Virtual Address Space Research/ubuntu12045.dmp"
-filePath = "file:///D:/Research/Virtual Address Space Research/windows81.dmp"
+filePath = "file:///D:/Research/Linux Kernel Modules/Resources/ubuntu12045latest.dmp"
 # default config (note my .volatilityrc is missing some values, 
 # so I just used pdb to figure out which values needed setting
 
-base_conf = {
-    'profile': 'Win8SP1x64', 
-    #'profile': 'LinuxUbuntu12045x64', 
+base_conf = { 
+    'profile': 'LinuxUbuntu12045x64', 
     'use_old_as': None, 
     'kdbg': None, 
     'help': False, 
@@ -62,8 +62,6 @@ addressSpace = utils.load_as(config)
 
 def getPhysicalPageAddress(entry):
     return entry & PHYSICAL_ADDRESS
-
-
 
 #returns a list of all physical pages referenced by (some level) paging table construct.
 def getPhsyicalPagesForPagingTable(pagingTableAddress):
@@ -122,8 +120,7 @@ def printPagingTables():
 
 '''
     This method seeks a PML4e that references the original PML4 table, and as such is a self-reference entry.
-    For more about self-reference page table management, read https://www.noteblok.net/wp-content/uploads/sites/3/2015/01/Self-referenced_Page_Tables-Vogel-ASPLOS_SrC.pdf 
-    or https://labs.mwrinfosecurity.com/blog/windows-8-kernel-memory-protections-bypass 
+    For more about self-reference page table management, read https://onedrive.live.com/edit.aspx?cid=31589810d04aaea8&id=documents&resid=31589810D04AAEA8!745&app=OneNote&authkey=!APMjKybJLONKow0&&wd=target%28%2F%2FKernel%20Facilities.one%7C67cfce63-bb27-427e-9a07-0b93738067f0%2FPage%20Table%20Management%7Cb3ba26b7-6481-4632-87aa-369fb29b998f%2F%29
 '''
 def findSelfReferenceEntry():
     for pml4Selector in range(0,MAX_SELECTOR):
@@ -155,18 +152,78 @@ def findPageTableManagementAddresses():
             print "The following virtual address: ",hex(page), " references a paging table construct, in physical page: ", hex(physicalPageAddress)
 
 
+def listModulesLinux():
+    modules = set([module for (module, params, sects) in linux_lsmod.linux_lsmod(config).calculate()])
+    for mod in modules:
+        #print (list(mod.obj_vm.get_available_pages()))[-1]
+        print mod.name, hex(mod.module_core), hex(mod.module_core + mod.core_size)
+        
 
-#These functions iterate over the addresspace seeking for PAGE_READWRITE_EXECUTE kernel pages and ranges.
-def printKernelExecutableAndWriteablePages():
-    for page,size in addressSpace.get_available_pages():
-        if(isAddressExecutable(page) and isAddressWriteable(page) and isKernelSpaceAddress(page)):
-            print "Found a writeable & executable kernel page, at: ", hex(page)
+#windows specific function
+def getAddressKernelModuleMapping():
+    scanner = modscan.ModScan(config)
+    addressToKernelModule = {}
+    for ldr_entry in  scanner.calculate():
+        moduleName = str(ldr_entry.BaseDllName or '')
+        moduleBaseAddress = ldr_entry.DllBase
+        moduleSize = ldr_entry.SizeOfImage
+        moduleEndAddress = moduleBaseAddress + moduleSize
+
+        print moduleName, hex(moduleBaseAddress), hex(moduleEndAddress),hex(moduleSize)
+
+        if(moduleBaseAddress & 1 << 48):
+            #it is a kernel module
+            modulePageStartAddress = moduleBaseAddress - (moduleBaseAddress % PAGE_SIZE)
+            modulePageEndAddress  = (moduleEndAddress - (moduleEndAddress % PAGE_SIZE)) + PAGE_SIZE
+
+            for address in range(modulePageStartAddress, modulePageEndAddress, PAGE_SIZE):
+                addressToKernelModule[address] = moduleName
+
+    return addressToKernelModule
+
+
+
+
+#A memory range is a continous virtual memory chunk with same attributes (I only check for protection) 
+def parseMemoryRanges():
+    rangeStartAddress = None
+    rangeEndAddress = None
+    for currentAddress,size in addressSpace.get_available_pages():
+        if(rangeStartAddress is None):
+            rangeStartAddress = currentAddress
+            rangeEndAddress = currentAddress + size
+            continue #start new range
+        if(isAddressExecutable(rangeStartAddress) == isAddressExecutable(currentAddress) and \
+           isKernelSpaceAddress(rangeStartAddress) == isKernelSpaceAddress(currentAddress) and \
+           isAddressWriteable(rangeStartAddress) == isAddressWriteable(currentAddress)):
+           rangeEndAddress = currentAddress + size
+           continue #with current range
+        
+        #ended range
+        yield (rangeStartAddress, rangeEndAddress)
+        rangeStartAddress = currentAddress
+        rangeEndAddress = currentAddress + size
+
+def locateKernelExecutableRanges():
+    for rangeStartAddress,rangeEndAddress in parseMemoryRanges():
+        if(isAddressExecutable(rangeStartAddress) and isKernelSpaceAddress(rangeStartAddress)):
+            yield (rangeStartAddress, rangeEndAddress)
+
+def locateKernelWriteableAndExecutableRanges():
+    for rangeStartAddress,rangeEndAddress in parseMemoryRanges():
+        if(isAddressExecutable(rangeStartAddress) and isKernelSpaceAddress(rangeStartAddress) and isAddressWriteable(rangeStartAddress)):
+            yield (rangeStartAddress, rangeEndAddress)
+
 
 def printKernelExecutableAndWriteableRanges():
-    for rangeStartAddress,size in addressSpace.get_available_addresses():
+    for (rangeStartAddress, rangeEndAddress) in locateKernelWriteableAndExecutableRanges():
         #NOTE: this check may be replaced with a check on all pages in range instead, but i found it good enough for my purpose
         if(isAddressExecutable(rangeStartAddress) and isAddressWriteable(rangeStartAddress) and isKernelSpaceAddress(rangeStartAddress)): 
-            print "Found a writeable & executable range, from ",hex(rangeStartAddress)," to ", hex(rangeStartAddress + size), " sized ", hex(size)
+            print "Found a writeable & executable range, from ",hex(rangeStartAddress)," to ", hex(rangeEndAddress), " sized ", hex(rangeEndAddress-rangeStartAddress)
+
+def printKernelExecutableRanges():
+    for (rangeStartAddress, rangeEndAddress) in locateKernelExecutableRanges():
+        print "Found a executable range, from ",hex(rangeStartAddress)," to ", hex(rangeEndAddress), " sized ", hex(rangeEndAddress-rangeStartAddress)
 
 def getPageTableEntries(addr):
     vaddr = long(addr)
@@ -211,27 +268,51 @@ def isAddressWriteable(addr):
 def isKernelSpaceAddress(addr):
     return any(map(lambda entry: addressSpace.is_supervisor_page(entry), getPageTableEntries(addr)))
 
-print "Virtual Address Space Research Entry Point: J.C. In!"
+def addressToPXE(addr, pte_base):
+    return ((addr >> 12) << 2) + pte_base
 
 
-print "Finding Self-Reference entries, if available"
-findSelfReferenceEntry()
-print "Done finding Self-Reference entries"
+if __name__ == '__main__':
+    print "Virtual Address Space Research Entry Point: J.C. In!"
 
-print "Printing paging table constructs"
-printPagingTables()
-print "Done printing paging table constructs"
+        
+    print "Printing kernel executable ranges"
+    printKernelExecutableRanges()
+    print "Done printing kernel executable ranges"
 
-print "Printing virtual addresses that are used to manage the paging table constructs"
-findPageTableManagementAddresses()
-print "Done printing virtual addresses that are used to manage the paging table constructs"
+    print "Finding Self-Reference entries, if available"
+    findSelfReferenceEntry()
+    print "Done finding Self-Reference entries"
 
-print "Printing kernel executable and writeable ranges"
-printKernelExecutableAndWriteableRanges()
-print "Done printing kernel executable and writeable ranges"
+    print "Printing paging table constructs"
+    printPagingTables()
+    print "Done printing paging table constructs"
 
-print "Printing kernel executable and writeable pages"
-printKernelExecutableAndWriteablePages()
-print "Done printing kernel executable and writeable pages"
+    print "Printing virtual addresses that are used to manage the paging table constructs"
+    findPageTableManagementAddresses()
+    print "Done printing virtual addresses that are used to manage the paging table constructs"
 
-print "Virtual Address Space Research Entry Point: J.C. Out!"
+    print "Printing kernel executable and writeable ranges"
+    printKernelExecutableAndWriteableRanges()
+    print "Done printing kernel executable and writeable ranges"
+
+    print "Printing kernel executable and writeable pages"
+    printKernelExecutableAndWriteablePages()
+    print "Done printing kernel executable and writeable pages"
+
+
+    
+
+    print "Virtual Address Space Research Entry Point: J.C. Out!"
+
+    '''def printKernelExecutableRanges():
+    for rangeStartAddress,size in addressSpace.get_available_pages():
+        if(isAddressExecutable(rangeStartAddress) and isKernelSpaceAddress(rangeStartAddress)):
+            currentAddress =  rangeStartAddress
+            while(isAddressExecutable(rangeStartAddress) and isKernelSpaceAddress(rangeStartAddress)):
+                
+        print "Found a executable range, from ",hex(rangeStartAddress)," to ", hex(rangeStartAddress + size), " sized ", hex(size)
+    '''
+
+    
+    
